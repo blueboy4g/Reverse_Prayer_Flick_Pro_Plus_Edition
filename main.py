@@ -1,7 +1,7 @@
 import keyboard
 import win32con
 import win32gui
-from pray_detector import *
+from pray_detector2 import *
 from tkinter import filedialog
 from tkinter import ttk
 import subprocess
@@ -10,84 +10,68 @@ import requests
 import webbrowser
 from config.config import *
 import setup
-
-block_counter = 0
-block_type = ""
-HOTKEY_TO_PRAYER = {}  # will populate from keybinds
-
-import keyboard
-import threading
-import time
-
-block_counter = 0
-block_type = ""
-
-# Find the initial region for prayer detection
 region = find_scaled_image()
+import keyboard
+import threading, time
+from pray_detector2 import is_praying
 
-# Modifier key mapping
-MODIFIER_TO_HOTKEY = {
-    "LCTRL": "ctrl",
-    "LSHIFT": "shift",
-    "LALT": "alt",
-    "CTRL": "ctrl",
-    "SHIFT": "shift",
-    "ALT": "alt"
-}
-
-# Build hotkey → prayer mapping from keybinds
-HOTKEY_TO_PRAYER = {}
-for ability, keys in keybind_config["PRAYER_KEYBINDS"].items():
-    hotkey_parts = []
+# --- Parse keybinds JSON into main key + modifiers for each prayer ---
+HOTKEYS = {}  # e.g. {"magic": {"main": "q", "mods": ["ctrl"]}, ...}
+for prayer_name, keys in keybind_config["PRAYER_KEYBINDS"].items():
+    main_key, mods = None, []
     for k in keys:
-        k_upper = k.upper()
-        if k_upper in MODIFIER_TO_HOTKEY:
-            hotkey_parts.append(MODIFIER_TO_HOTKEY[k_upper])
+        if k.upper() in ["LCTRL","CTRL"]:
+            mods.append("ctrl")
+        elif k.upper() in ["LSHIFT","SHIFT"]:
+            mods.append("shift")
+        elif k.upper() in ["LALT","ALT"]:
+            mods.append("alt")
         else:
-            hotkey_parts.append(k.lower())
-    hotkey = "+".join(hotkey_parts)
-    HOTKEY_TO_PRAYER[hotkey] = ability.lower()
-    print("Registering hotkey:", hotkey)
+            main_key = k.lower()
+    if main_key:
+        HOTKEYS[prayer_name.lower()] = {"main": main_key, "mods": mods}
 
-# ---------------- Thread: Update current active prayer ----------------
-def monitor_prayer():
-    """Continuously updates block_type with the current active prayer."""
-    global block_type
-    while True:
-        current_prayer = is_praying(region)
-        if current_prayer:
-            block_type = current_prayer
-        else:
-            block_type = ""
-        time.sleep(0.05)  # ~20 FPS
+block_type = ""            # current active prayer name (lowercase or "")
+blocked_handlers = {}      # maps prayer_name -> hotkey handler
+block_counter = 0         # optional debug count
 
-threading.Thread(target=monitor_prayer, daemon=True).start()
-
-# ---------------- Hotkey blocking logic ----------------
-def on_hotkey_pressed(hotkey):
-    """
-    Blocks a key press ONLY if the hotkey corresponds to
-    the currently active prayer (prevent re-activating same prayer).
-    """
+def block_action(prayer_name, key_name):
+    """Callback when a prayer key is pressed while that prayer is active."""
     global block_counter
-    requested_prayer = HOTKEY_TO_PRAYER.get(hotkey)
+    block_counter += 1
+    print(f"Blocked {key_name} for active prayer '{prayer_name}'")
 
-    # If the requested prayer is the same as current active prayer, block it
-    if requested_prayer and requested_prayer == block_type:
-        block_counter += 1
-        print(f"Blocked key press for {block_type} prayer")
-        return True  # suppress key
-    # Otherwise allow it (switching prayers or toggling off)
-    return False
+def monitor_prayer():
+    """Thread: detect active prayer, add/remove key suppression accordingly."""
+    global block_type
+    prev_prayer = ""
+    while True:
+        current = is_praying(region)  # returns e.g. "Magic" or None
+        prayer = current.lower() if current else ""
+        block_type = prayer
+        if prayer != prev_prayer:
+            # Unblock previous prayer's key if it was blocked
+            if prev_prayer in blocked_handlers:
+                keyboard.remove_hotkey(blocked_handlers[prev_prayer])
+                blocked_handlers.pop(prev_prayer, None)
+            # If a new prayer is active, block its key
+            if prayer and prayer in HOTKEYS:
+                main = HOTKEYS[prayer]["main"]
+                mods = HOTKEYS[prayer]["mods"]
+                # Form hotkey string, e.g. "ctrl+q" or "q" if no mods
+                hotkey = "+".join(mods + [main])
+                # Register a no-op callback with suppress=True to block it
+                handler = keyboard.add_hotkey(
+                    hotkey,
+                    lambda p=prayer, k=main: block_action(p, k),
+                    suppress=True
+                )
+                blocked_handlers[prayer] = handler
+            prev_prayer = prayer
+        time.sleep(0.01)
 
-# ---------------- Register hotkeys ----------------
-for hotkey in HOTKEY_TO_PRAYER:
-    keyboard.add_hotkey(
-        hotkey,
-        lambda h=hotkey: on_hotkey_pressed(h),
-        suppress=True
-    )
-
+# Start the monitoring thread
+threading.Thread(target=monitor_prayer, daemon=True).start()
 # ---------------- Optional: monitor block counter ----------------
 def print_block_count():
     """Just prints how many blocks happened (for debug)."""
@@ -98,8 +82,6 @@ def print_block_count():
 
 # Uncomment to see debug info in console
 threading.Thread(target=print_block_count, daemon=True).start()
-
-keyboard.wait()  # Keep script running
 
 
 def make_window_always_on_top():
@@ -196,10 +178,10 @@ def open_youtube():
 root = tk.Tk()
 root.title("Pray Flick Pro")
 #TODO config
-root.geometry("460x100")
+root.geometry("480x100")
 root.iconbitmap(ICON_PATH)
 #TODO config
-# make_window_always_on_top()
+make_window_always_on_top()
 
 # Dark button styling
 style = ttk.Style()
@@ -258,9 +240,10 @@ def update_block_counter():
     root.after(100, update_block_counter)  # refresh every 100ms
 
 ttk.Button(left, text="Setup Pray Pro", style="Gray.TButton",
-           #TODO command=lambda: start_script("key_binds.exe")).pack(pady=2, fill="x")
+           #TODO
+           command=lambda: start_script("setup.exe")).pack(pady=2, fill="x")
            #TODO this will work once it goes into exe for now the mod keys dont show??
-           command=lambda: setup.start_setup(KEYBINDS_FILE)).pack(pady=2, fill="x")
+           #command=lambda: setup.start_setup(KEYBINDS_FILE)).pack(pady=2, fill="x")
 
 ttk.Button(right, text="Edit Config", style="Gray.TButton",
            command=lambda: open_file_editor(config_file.get())).pack(pady=2, fill="x")
